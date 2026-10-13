@@ -1,7 +1,0 @@
-{
-  "name": "armor-lab-full-game-model-modules",
-  "version": "1.1.0",
-  "private": true,
-  "type": "module",
-  "description": "Full ARMOR LAB gameplay with separate tank model modules"
-}
