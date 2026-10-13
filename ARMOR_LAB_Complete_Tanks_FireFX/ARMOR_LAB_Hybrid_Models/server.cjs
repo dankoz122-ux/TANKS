@@ -37,9 +37,32 @@ function frame(opcode, payload) {
 }
 function sendRaw(peer, opcode, payload) { if (!peer.closed && !peer.socket.destroyed) peer.socket.write(frame(opcode,payload)); }
 function send(peer, data) { try { sendRaw(peer, 1, Buffer.from(JSON.stringify(data))); } catch {} }
-function roomPlayers(room) { const now=Date.now(); return [...room.players.values()].map(p => ({id:p.id,nickname:p.nickname,tank:p.tank,team:p.team,x:p.x,y:p.y,z:p.z,yaw:p.yaw,turretYaw:p.turretYaw,gunPitch:p.gunPitch,velocity:p.velocity,health:p.health,alive:p.alive,fatalReason:p.fatalReason||null,respawnAt:p.respawnAt||null,respawnIn:p.alive?0:Math.max(0,((p.respawnAt||now)-now)/1000),modules:{...p.modules}})); }
+function roomPlayers(room) { const now=Date.now(); return [...room.players.values()].map(p => ({id:p.id,nickname:p.nickname,tank:p.tank,team:p.team,isHost:p.id===room.hostId,x:p.x,y:p.y,z:p.z,yaw:p.yaw,turretYaw:p.turretYaw,gunPitch:p.gunPitch,velocity:p.velocity,health:p.health,alive:p.alive,fatalReason:p.fatalReason||null,respawnAt:p.respawnAt||null,respawnIn:p.alive?0:Math.max(0,((p.respawnAt||now)-now)/1000),modules:{...p.modules}})); }
+function roomInfo(room) { return {room:room.code,map:room.map,mapSeed:room.mapSeed,hostId:room.hostId,config:{...room.config}}; }
 function broadcast(room, data, exceptId=null) { const text=JSON.stringify(data); const f=frame(1,Buffer.from(text)); for(const p of room.players.values()) if(p.id!==exceptId&&!p.closed&&!p.socket.destroyed) p.socket.write(f); }
-function getRoom(code) { if(!rooms.has(code)) rooms.set(code,{code,players:new Map(),nextTeam:0}); return rooms.get(code); }
+const VALID_MAPS = new Set(['range','desert','dusk']);
+const DEFAULT_ROOM_CONFIG = {gameMode:'range',botCount:3,roundLength:180,difficulty:'normal',coverEnabled:true};
+function cleanMap(value, fallback='range') { const map=String(value||fallback); return VALID_MAPS.has(map)?map:(VALID_MAPS.has(fallback)?fallback:'range'); }
+function cleanRoomConfig(value, fallback=DEFAULT_ROOM_CONFIG) {
+  const v=value&&typeof value==='object'?value:{};
+  const allowedModes=new Set(['range','rounds','team','survival']);
+  const allowedDifficulty=new Set(['easy','normal','hard']);
+  const allowedLengths=new Set([120,180,300]);
+  const old=fallback||DEFAULT_ROOM_CONFIG;
+  const length=Number(v.roundLength);
+  const count=Number(v.botCount);
+  return {
+    gameMode:allowedModes.has(v.gameMode)?v.gameMode:(old.gameMode||'range'),
+    botCount:Number.isFinite(count)?Math.max(1,Math.min(6,Math.round(count))):(old.botCount||3),
+    roundLength:allowedLengths.has(length)?length:(old.roundLength||180),
+    difficulty:allowedDifficulty.has(v.difficulty)?v.difficulty:(old.difficulty||'normal'),
+    coverEnabled:typeof v.coverEnabled==='boolean'?v.coverEnabled:(typeof old.coverEnabled==='boolean'?old.coverEnabled:true)
+  };
+}
+function getRoom(code, initialMap='range', initialConfig=DEFAULT_ROOM_CONFIG) {
+  if(!rooms.has(code)) rooms.set(code,{code,players:new Map(),nextTeam:0,hostId:null,map:cleanMap(initialMap),mapSeed:crypto.randomInt(1,0x7fffffff),config:cleanRoomConfig(initialConfig)});
+  return rooms.get(code);
+}
 function cleanNick(value) { const s=String(value||'').replace(/[<>\u0000-\u001f]/g,'').trim().slice(0,24); return s || 'Tanker'; }
 function cleanRoom(value) { const s=String(value||'POLYGON').toUpperCase().replace(/[^A-Z0-9_-]/g,'').slice(0,16); return s.length>=2?s:'POLYGON'; }
 function clampNum(n, min, max, fallback=0) { n=Number(n); return Number.isFinite(n) ? Math.max(min,Math.min(max,n)) : fallback; }
@@ -73,22 +96,23 @@ function respawnPlayer(room, peer) {
 }
 function leaveRoom(peer) {
   if(!peer.room) return;
-  const room=peer.room; room.players.delete(peer.id); peer.room=null;
-  broadcast(room,{type:'player_left',id:peer.id,nickname:peer.nickname,players:roomPlayers(room)});
+  const room=peer.room; const wasHost=room.hostId===peer.id; room.players.delete(peer.id); peer.room=null;
+  if(wasHost&&room.players.size) room.hostId=room.players.keys().next().value;
+  broadcast(room,{type:'player_left',id:peer.id,nickname:peer.nickname,players:roomPlayers(room),...roomInfo(room)});
   for (const [id, shot] of projectiles) if(shot.room===room.code && shot.shooterId===peer.id) projectiles.delete(id);
-  if(room.players.size===0) rooms.delete(room.code); else broadcast(room,{type:'roster',players:roomPlayers(room),room:room.code});
+  if(room.players.size===0) rooms.delete(room.code); else { broadcast(room,{type:'room_config',...roomInfo(room),players:roomPlayers(room)}); broadcast(room,{type:'roster',players:roomPlayers(room),...roomInfo(room)}); }
 }
 function joinRoom(peer, msg) {
   if(peer.room) leaveRoom(peer);
   const roomCode=cleanRoom(msg.room);
-  const room=getRoom(roomCode);
+  const room=getRoom(roomCode,cleanMap(msg.map),cleanRoomConfig(msg.config));
   if(room.players.size>=MAX_PLAYERS_PER_ROOM) { send(peer,{type:'error',message:'Комната заполнена (максимум '+MAX_PLAYERS_PER_ROOM+')'}); return; }
-  peer.id=crypto.randomUUID(); peer.nickname=cleanNick(msg.nickname); peer.tank=['t90','abrams','leopard','merkava'].includes(msg.tank)?msg.tank:'t90'; peer.room=room; peer.spawnSlot=room.players.size; peer.team=(room.nextTeam++%2===0?'blue':'red');
+  peer.id=crypto.randomUUID(); peer.nickname=cleanNick(msg.nickname); peer.tank=['t90','abrams','leopard','merkava'].includes(msg.tank)?msg.tank:'t90'; peer.room=room; peer.spawnSlot=room.players.size; peer.team=(room.nextTeam++%2===0?'blue':'red'); if(!room.hostId) room.hostId=peer.id;
   const spawn=spawnFor(room,peer);
   Object.assign(peer,spawn,{health:100,alive:true,modules:{engine:100,track:100,gun:100,crew:100,ammo:100,optics:100},fatalReason:null,lastState:Date.now()});
   room.players.set(peer.id,peer);
-  send(peer,{type:'welcome',id:peer.id,room:room.code,playerCount:room.players.size,player:roomPlayers(room).find(p=>p.id===peer.id),players:roomPlayers(room)});
-  broadcast(room,{type:'player_joined',player:roomPlayers(room).find(p=>p.id===peer.id),players:roomPlayers(room)},peer.id);
+  send(peer,{type:'welcome',id:peer.id,playerCount:room.players.size,player:roomPlayers(room).find(p=>p.id===peer.id),players:roomPlayers(room),...roomInfo(room)});
+  broadcast(room,{type:'player_joined',player:roomPlayers(room).find(p=>p.id===peer.id),players:roomPlayers(room),...roomInfo(room)},peer.id);
 }
 function handleMessage(peer, data) {
   let msg; try { msg=JSON.parse(data.toString('utf8')); } catch { send(peer,{type:'error',message:'Некорректный JSON'}); return; }
@@ -96,6 +120,14 @@ function handleMessage(peer, data) {
   if(msg.type==='hello'||msg.type==='join') { joinRoom(peer,msg); return; }
   if(!peer.room) { send(peer,{type:'error',message:'Сначала подключись к комнате'}); return; }
   const room=peer.room;
+  if(msg.type==='set_map') {
+    if(peer.id!==room.hostId) { send(peer,{type:'error',message:'Только создатель комнаты может менять карту и запускать раунд'}); return; }
+    room.map=cleanMap(msg.map,room.map);
+    room.mapSeed=crypto.randomInt(1,0x7fffffff);
+    room.config=cleanRoomConfig(msg.config,room.config);
+    broadcast(room,{type:'map_changed',...roomInfo(room),startRound:msg.startRound===true,changedBy:peer.id});
+    return;
+  }
   if(msg.type==='state') {
     if(!peer.alive) return;
     peer.x=clampNum(msg.x,-500,500,peer.x); peer.y=clampNum(msg.y,-5,20,peer.y); peer.z=clampNum(msg.z,-500,500,peer.z);
@@ -118,7 +150,7 @@ function handleMessage(peer, data) {
   if(msg.type==='impact') {
     const projectileId=String(msg.projectileId||''), shot=projectiles.get(projectileId); if(!shot||shot.room!==room.code||shot.hit) return;
     if(shot.shooterId!==peer.id) return;
-    shot.hit=true; broadcast(room,{type:'impact',projectileId}); return;
+    shot.hit=true; const coverId=typeof msg.coverId==='string'&&/^cover-\d+$/.test(msg.coverId)?msg.coverId:null; broadcast(room,{type:'impact',projectileId,coverId}); return;
   }
   if(msg.type==='hit') {
     const projectileId=String(msg.projectileId||''), shot=projectiles.get(projectileId); if(!shot||shot.room!==room.code||shot.hit) return;
@@ -192,7 +224,7 @@ setInterval(()=>{
   for(const room of rooms.values()) if(room.players.size) {
     // Destroyed vehicles stay in the room as visible wrecks until their cooldown expires.
     for(const peer of room.players.values()) if(!peer.alive&&peer.respawnAt&&peer.respawnAt<=now) respawnPlayer(room,peer);
-    broadcast(room,{type:'snapshot',room:room.code,serverTime:now,players:roomPlayers(room)});
+    broadcast(room,{type:'snapshot',...roomInfo(room),serverTime:now,players:roomPlayers(room)});
   }
 },100).unref();
 server.listen(PORT,HOST,()=>console.log(`ARMOR LAB multiplayer server listening at http://localhost:${PORT} (LAN: port ${PORT})`));

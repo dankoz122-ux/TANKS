@@ -51,12 +51,14 @@ This build includes a simple WebSocket room server and player synchronization. N
 
 ### What syncs
 
+- Selected map (`range`, `desert`, `dusk`), shared map-generation seed and round settings; the first player is host. The host's **ПРИМЕНИТЬ И НАЧАТЬ** action updates every client in that room.
+- Procedural cover layout generated from the same seed and cover destruction events.
 - Room roster, nickname, tank model, team color/label.
 - Chassis position and rotation, turret traverse and gun elevation (interpolated on other clients).
 - Projectile visuals, player-to-player impacts, module damage, destruction and network respawn.
 - A room code separates groups of players; up to 16 players per room.
 
-The current multiplayer prototype synchronizes players and PvP events. Bots, map settings and round timers still run locally on each client; it is not yet a fully authoritative anti-cheat dedicated server. Three.js is loaded from jsDelivr, so internet access is still required for the 3D renderer.
+The room creator selects the map and presses APPLY / START ROUND. The server stores the selected map, a shared generation seed, and shared round settings. All clients build identical landmark and cover layouts from the same seed, so a client cannot accidentally be on the desert while another is on the training range. Non-host clients see the same selection and cannot start a conflicting map. Destructible cover removal is also broadcast to the room. Bot movement and their combat still run locally on each client; this is not yet a fully authoritative anti-cheat dedicated server. Three.js is loaded from jsDelivr, so internet access is required for the 3D renderer.
 
 
 ## Multiplayer death and respawn
