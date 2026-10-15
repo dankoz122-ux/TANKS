@@ -1,0 +1,12 @@
+{
+  "name": "armor-lab",
+  "version": "0.6.0",
+  "private": true,
+  "type": "module",
+  "description": "ARMOR LAB — браузерный танковый симулятор с онлайн-комнатами",
+  "scripts": {
+    "start": "node server.cjs",
+    "test": "node tools/check-traits.mjs && node tools/test-server.mjs"
+  },
+  "engines": { "node": ">=18" }
+}

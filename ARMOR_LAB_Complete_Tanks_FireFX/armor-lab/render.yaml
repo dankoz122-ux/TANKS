@@ -1,0 +1,16 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: armor-lab
+    runtime: node
+    plan: free              # для постоянной работы без «засыпания» выберите платный план (starter)
+    region: frankfurt       # ближайший к игрокам регион
+    buildCommand: echo "no build step"   # зависимостей нет
+    startCommand: node server.cjs
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: MAX_PLAYERS
+        value: "12"

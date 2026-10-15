@@ -1,0 +1,55 @@
+# Смоук-тест в Chromium (Playwright for Python): three.js подменён заглушкой, сервер и игра — настоящие.
+# Запуск: python3 tools/e2e/e2e.py   (проверяет лобби, вход в комнату, синхронизацию, урон/килл, чат, переподключение, одиночный режим)
+import subprocess, time, json, sys, os
+from playwright.sync_api import sync_playwright
+PORT = 8124; HERE = os.path.dirname(os.path.abspath(__file__)); PROJ = os.path.abspath(os.path.join(HERE, '..', '..'))
+stub = open(os.path.join(HERE, 'three-stub.mjs')).read()
+srv = subprocess.Popen(['node', 'server.cjs'], cwd=PROJ, env={**os.environ, 'PORT': str(PORT), 'HOST': '127.0.0.1'}, stdout=subprocess.PIPE, text=True)
+srv.stdout.readline()
+errors = []; logs = []
+try:
+    with sync_playwright() as p:
+        b = p.chromium.launch(args=['--no-sandbox'])
+        pg = b.new_page(viewport={'width': 1280, 'height': 720})
+        pg.on('pageerror', lambda e: errors.append('pageerror: ' + str(e) + ' @ ' + (getattr(e,'stack','') or '')[:600]))
+        pg.on('console', lambda m: (errors.append('console.error: ' + m.text) if m.type == 'error' else logs.append(m.text)))
+        def route(r):
+            u = r.request.url
+            if u.endswith('three.module.js'): r.fulfill(body=stub, content_type='text/javascript')
+            elif 'examples/jsm/controls/OrbitControls.js' in u: r.fulfill(body="export {OrbitControls} from 'three';", content_type='text/javascript')
+            elif 'examples/jsm/controls/TransformControls.js' in u: r.fulfill(body="export {TransformControls} from 'three';", content_type='text/javascript')
+            else: r.continue_()
+        pg.route('https://cdn.jsdelivr.net/**', route)
+        pg.goto(f'http://127.0.0.1:{PORT}/'); pg.wait_for_selector('#playerNick', timeout=10000)
+        pg.fill('#playerNick', 'WebPlayer'); pg.click('[data-start-tank="abrams"]')
+        print('start screen ok')
+        pg.click('#playOnlineBtn'); pg.wait_for_selector('#mpLobby.show', timeout=5000)
+        pg.wait_for_selector('.mp-room', timeout=5000); print('lobby rooms:', pg.locator('.mp-room').count())
+        pg.click('#mpQuick'); pg.wait_for_selector('#mpRoot.in-room', timeout=5000); print('joined room; bar:', pg.inner_text('#mpBarMain'), '|', pg.inner_text('#mpBarInfo'))
+        pg.keyboard.down('w')
+        bot = subprocess.run(['node', os.path.join(HERE, 'bot.mjs'), str(PORT)], capture_output=True, text=True, cwd=HERE, timeout=60)
+        pg.keyboard.up('w')
+        print(bot.stdout.strip() or bot.stderr.strip())
+        time.sleep(0.3)
+        print('feed:', pg.inner_text('#mpFeed').replace('\n', ' | '))
+        print('chat:', pg.inner_text('#mpChatLog').replace('\n', ' | '))
+        pg.keyboard.down('Tab'); time.sleep(.2); print('board visible:', pg.locator('#mpBoard.show').count(), '|', pg.inner_text('#mpBoard')[:160].replace('\n', ' ')); pg.keyboard.up('Tab')
+        pg.keyboard.press('Enter'); pg.keyboard.type('hello from web'); pg.keyboard.press('Enter'); time.sleep(.4); print('chat after send:', pg.inner_text('#mpChatLog').replace('\n', ' | ')[-80:])
+        pg.click('#mpLeave'); time.sleep(.3); print('left room, in-room:', pg.locator('#mpRoot.in-room').count())
+        # одиночный режим после выхода из онлайна и в свежей вкладке
+        pg.click('#gameSettingsBtn'); pg.select_option('#gameMode','rounds'); pg.click('#startRoundBtn'); time.sleep(.5)
+        pg.keyboard.press('Space'); pg.keyboard.press('x'); time.sleep(.5); print('SP after leave: roundBanner =', pg.inner_text('#roundBanner')[:40], '| bots btn:', pg.inner_text('#botsBtn'))
+        pg2 = b.new_page(); pg2.on('pageerror', lambda e: errors.append('pageerror2: ' + str(e)))
+        pg2.route('https://cdn.jsdelivr.net/**', route); pg2.goto(f'http://127.0.0.1:{PORT}/'); pg2.fill('#playerNick','Solo'); pg2.click('#enterGameBtn'); time.sleep(.4)
+        pg2.click('#gameSettingsBtn'); pg2.click('#startRoundBtn'); time.sleep(.4); pg2.keyboard.press('Space'); time.sleep(.6); print('SP fresh: tank =', pg2.inner_text('#tankName'), '| shells text =', pg2.inner_text('#ammoText')[:30])
+        pg2.click('#xrayBtn'); time.sleep(.3); pg2.click('#closeModal'); pg2.click('#openBuilderBtn'); time.sleep(.4); print('builder opened:', pg2.locator('body.builder-on').count())
+        pg3 = b.new_page(); pg3.on('pageerror', lambda e: errors.append('pageerror3: ' + str(e)))
+        pg3.add_init_script("const W=WebSocket;window.__wss=[];window.WebSocket=class extends W{constructor(...a){super(...a);window.__wss.push(this)}}")
+        pg3.route('https://cdn.jsdelivr.net/**', route); pg3.goto(f'http://127.0.0.1:{PORT}/'); pg3.fill('#playerNick','TeamPlayer'); pg3.click('[data-start-tank="merkava"]'); pg3.click('#playOnlineBtn'); pg3.wait_for_selector('.mp-room')
+        pg3.locator('.mp-room', has_text='команды').locator('button').click(); pg3.wait_for_selector('#mpRoot.in-room'); print('TDM bar:', pg3.inner_text('#mpBarMain'), '|', pg3.inner_text('#mpBarInfo'))
+        pg3.evaluate('window.__wss.at(-1).close()'); time.sleep(.3); print('after drop:', pg3.inner_text('#mpNet')[:40])
+        time.sleep(2.5); print('after reconnect in-room:', pg3.locator('#mpRoot.in-room').count(), '| net banner shown:', pg3.locator('#mpNet.show').count(), '| bar:', pg3.inner_text('#mpBarInfo')[:50])
+        b.close()
+finally:
+    srv.kill()
+print('ERRORS:', json.dumps(errors, ensure_ascii=False, indent=1) if errors else 'none')
